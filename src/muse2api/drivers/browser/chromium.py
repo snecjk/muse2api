@@ -84,7 +84,10 @@ class ChromiumProcess:
             args.insert(1, f"--proxy-server={self.proxy}")
         if self.headless:
             args[1:1] = ["--headless=new", "--disable-gpu"]
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
+        # Debian Chromium cannot use its normal sandbox inside the service's
+        # unprivileged Docker container. Keep the sandbox on for ordinary host
+        # runs, but disable it explicitly when Docker is detected.
+        if Path("/.dockerenv").exists() or (hasattr(os, "geteuid") and os.geteuid() == 0):
             args.insert(1, "--no-sandbox")
 
         log.info("launching Chromium: %s", self.executable)
