@@ -78,6 +78,12 @@ class Settings(BaseSettings):
         description="SSE ': keepalive' comment interval while waiting for the first "
         "stream token; 0 disables. Keeps idle clients/proxies from timing out.",
     )
+    auto_conversation: bool = Field(
+        default=False,
+        description="When an OpenAI-compatible client omits the user field, derive a stable, "
+        "privacy-preserving conversation id from its API key, client address and User-Agent. "
+        "Message history is still checked before a browser page is reused.",
+    )
     image_timeout: float = 240.0
     video_timeout: float = 600.0
 

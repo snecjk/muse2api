@@ -219,6 +219,26 @@ def test_conversation_key_is_scoped_by_api_key(client, auth, admin, monkeypatch)
     assert hints == ["legacy:alice", f"{other['key']['id']}:alice", "legacy:alice", None]
 
 
+def test_auto_conversation_fingerprints_clients(client, auth, monkeypatch):
+    seen = _capture_chat_requests(client, monkeypatch)
+    client.app.state.services.settings.auto_conversation = True
+    body = {"model": "muse-chat", "messages": [{"role": "user", "content": "hi"}]}
+
+    a = {**auth, "User-Agent": "agent-a", "CF-Connecting-IP": "192.0.2.1"}
+    b = {**auth, "User-Agent": "agent-b", "CF-Connecting-IP": "192.0.2.1"}
+    assert client.post("/v1/chat/completions", headers=a, json=body).status_code == 200
+    assert client.post("/v1/chat/completions", headers=a, json=body).status_code == 200
+    assert client.post("/v1/chat/completions", headers=b, json=body).status_code == 200
+    assert client.post("/v1/chat/completions", headers={
+        **b, "X-Muse-Conversation-Id": "window-2"}, json=body).status_code == 200
+
+    hints = [r.conversation_hint for r in seen]
+    assert hints[0] == hints[1]
+    assert hints[2] != hints[0]
+    assert hints[3] not in hints[:3]
+    assert all(h and h.startswith("legacy:auto-") for h in hints)
+
+
 def test_responses_non_stream_string_input(client, auth):
     r = client.post("/v1/responses", headers=auth, json={"input": "hello"})
     assert r.status_code == 200

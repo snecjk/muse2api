@@ -32,6 +32,9 @@ BUILD_NETWORK="${BUILD_NETWORK:-}"
 BUILD_PROXY="${BUILD_PROXY:-}"
 BUILD_APT_MIRROR="${BUILD_APT_MIRROR:-}"
 BUILD_APT_SECURITY_MIRROR="${BUILD_APT_SECURITY_MIRROR:-}"
+# The runtime browser proxy is separate from the Docker build proxy. A proxy on
+# the host must be addressed through Docker's host gateway, not 127.0.0.1.
+RUNTIME_BROWSER_PROXY="${RUNTIME_BROWSER_PROXY:-}"
 # ------------------------------------------
 
 MANAGED_BEGIN="# BEGIN MUSE2API MANAGED"
@@ -147,6 +150,13 @@ build_image() {
 }
 
 create_container() {
+  local runtime_args=()
+  if [[ -n "${RUNTIME_BROWSER_PROXY}" ]]; then
+    runtime_args+=(
+      --add-host host.docker.internal:host-gateway
+      -e "MUSE2API_BROWSER_PROXY=${RUNTIME_BROWSER_PROXY}"
+    )
+  fi
   log "启动容器 ${MUSE_CONTAINER}..."
   docker run -d \
     --name "${MUSE_CONTAINER}" \
@@ -157,6 +167,7 @@ create_container() {
     -e "MUSE2API_PORT=${INTERNAL_PORT}" \
     -e MUSE2API_DATA_DIR=/app/data \
     -e "MUSE2API_PUBLIC_BASE=https://${DOMAIN}" \
+    "${runtime_args[@]}" \
     -v "${DATA_DIR}:/app/data" \
     --shm-size 1g \
     "${MUSE_IMAGE}" >/dev/null
@@ -181,6 +192,30 @@ wait_healthy() {
     sleep "${HEALTH_WAIT_INTERVAL}"
   done
   ok "muse2api 健康检查通过。"
+}
+
+check_upstream_network() {
+  log "检查容器到 muse.ai 的运行时网络..."
+  if docker exec "${MUSE_CONTAINER}" python -c '
+import os, urllib.error, urllib.request
+proxy = os.environ.get("MUSE2API_BROWSER_PROXY", "").strip()
+handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy}) if proxy else urllib.request.ProxyHandler({})
+request = urllib.request.Request("https://muse.ai/thread/new", method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+try:
+    response = urllib.request.build_opener(handler).open(request, timeout=15)
+except urllib.error.HTTPError as error:
+    # A 401/403 still proves that DNS, proxy CONNECT and TLS all worked.
+    response = error
+with response:
+    if response.status >= 500:
+        raise SystemExit(1)
+' >/dev/null 2>&1; then
+    ok "容器可访问 muse.ai。"
+  else
+    err "容器无法访问 muse.ai；/healthz 虽正常，聊天仍会 500/504。"
+    err "请检查 MUSE2API_BROWSER_PROXY 和代理节点状态。"
+    return 1
+  fi
 }
 
 resolve_caddyfile() {
@@ -226,7 +261,10 @@ configure_caddy() {
 ${MANAGED_BEGIN}
 ${DOMAIN} {
     encode gzip zstd
-    reverse_proxy ${MUSE_CONTAINER}:${INTERNAL_PORT}
+    reverse_proxy ${MUSE_CONTAINER}:${INTERNAL_PORT} {
+        # 立即向客户端刷新 SSE 数据，避免等待完整回答后一次性返回。
+        flush_interval -1
+    }
 }
 ${MANAGED_END}
 EOF
@@ -267,6 +305,7 @@ cmd_start() {
   if container_running; then
     ok "${MUSE_CONTAINER} 已在运行。"
     wait_healthy
+    check_upstream_network
     configure_caddy
     return
   fi
@@ -278,6 +317,7 @@ cmd_start() {
     create_container
   fi
   wait_healthy
+  check_upstream_network
   configure_caddy
 }
 
@@ -301,6 +341,7 @@ cmd_restart() {
   fi
   docker restart "${MUSE_CONTAINER}" >/dev/null
   wait_healthy
+  check_upstream_network
   configure_caddy
 }
 
@@ -342,6 +383,7 @@ cmd_update() {
   fi
   create_container
   wait_healthy
+  check_upstream_network
   configure_caddy
 }
 
@@ -365,6 +407,7 @@ usage() {
   CADDYFILE_HOST=/data/...    Caddyfile 宿主机路径（通常可自动识别）
   BUILD_NETWORK=host          Docker 构建网络（可选）
   BUILD_PROXY=http://...      Docker 构建 HTTP/HTTPS 代理（可选）
+  RUNTIME_BROWSER_PROXY=...   Chromium 运行时代理（可选）
   BUILD_APT_MIRROR=http://... Debian 软件源镜像（可选）
 EOF
 }

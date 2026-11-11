@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 
 from fastapi import Request
@@ -58,9 +59,27 @@ def require_api_key(request: Request) -> None:
 def conversation_key(request: Request, user: str | None) -> str | None:
     """The browser driver continues a muse.ai thread only for a non-empty key. Scoping
     ``user`` by the API key keeps two keys that send the same ``user`` apart."""
-    if not user:
+    key_id = getattr(request.state, "key_id", "")
+    if user:
+        return f"{key_id}:{user}"
+    if not get_services(request).settings.auto_conversation:
         return None
-    return f"{getattr(request.state, 'key_id', '')}:{user}"
+
+    # Most agent clients don't expose OpenAI's optional ``user`` field. Let clients
+    # that support custom headers provide a better id; otherwise use a hash so raw IP
+    # addresses and User-Agent strings never enter the account store.
+    supplied = request.headers.get("x-muse-conversation-id", "").strip()
+    if supplied:
+        identity = supplied
+    else:
+        forwarded = request.headers.get("cf-connecting-ip", "").strip()
+        if not forwarded:
+            forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        if not forwarded and request.client:
+            forwarded = request.client.host
+        identity = f"{forwarded}\0{request.headers.get('user-agent', '')}"
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:20]
+    return f"{key_id}:auto-{digest}"
 
 
 def require_admin_key(request: Request) -> None:

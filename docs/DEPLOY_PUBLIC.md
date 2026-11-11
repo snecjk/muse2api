@@ -134,6 +134,33 @@ curl --fail --show-error \
   https://muse.litemall.asia/v1/models
 ```
 
+聊天接口支持 OpenAI 兼容的 SSE 流式输出。客户端需要显式传入 `"stream": true`：
+
+```bash
+curl --no-buffer --fail --show-error \
+  -H 'Authorization: Bearer <API_KEY>' \
+  -H 'Content-Type: application/json' \
+  https://muse.litemall.asia/v1/chat/completions \
+  -d '{"model":"muse-chat","user":"稳定的用户ID","messages":[{"role":"user","content":"你好"}],"stream":true}'
+```
+
+同一会话持续传入相同的 `user`，服务会复用已打开的 Muse 对话页面；省略 `user` 时为了
+避免不同调用方串话，每个请求都会创建新对话。
+
+对首字延迟要求较高时，可在 `/data/muse2api/.env` 中启用一个预热线程。预热会额外
+占用一个 Chromium 标签页，并消耗一条短消息额度：
+
+```dotenv
+MUSE2API_WARM_THREADS=2
+MUSE2API_ACCOUNT_MAX_CONCURRENCY=3
+MUSE2API_STREAM_HEARTBEAT_INTERVAL=5
+MUSE2API_AUTO_CONVERSATION=true
+```
+
+`MUSE2API_AUTO_CONVERSATION=true` 适用于无法发送 OpenAI `user` 字段的 Agent 客户端。
+服务会按 API Key、客户端地址和 User-Agent 生成不可逆的会话标识；如果客户端支持自定义
+请求头，也可以传 `X-Muse-Conversation-Id` 精确区分窗口或会话。
+
 确认现有服务未受影响：
 
 ```bash
@@ -185,6 +212,17 @@ sudo SOURCE_MODE=local \
   bash ~/deploy-muse2api.sh start
 ```
 
+`BUILD_PROXY` 只用于构建镜像。Chromium 的运行时流量需要在 `.env` 中单独配置：
+
+```dotenv
+MUSE2API_BROWSER_PROXY=http://mihomo:7890
+```
+
+`mihomo` 必须与 `muse2api` 位于同一 Docker 网络，且代理组必须选中真实节点；
+如果 `PROXY` 组选中 `DIRECT`，即使配置了代理地址，国内服务器仍可能连接超时。
+新版部署脚本会在启动后主动检查容器到 `muse.ai` 的网络，避免只根据
+`/healthz` 误判服务可用。
+
 ## 9. 常见问题
 
 ### Caddyfile 不在默认目录
@@ -212,3 +250,15 @@ sudo docker logs --tail 200 muse2api
 - 云安全组已放行 80 和 443。
 - Caddy 容器正在运行并已接入 `newapi-net`。
 - `sudo bash ~/deploy-muse2api.sh status` 显示容器健康。
+
+### `/healthz` 正常，聊天持续 500/504
+
+日志出现 `TimeoutError`、`muse.ai page did not become ready` 或
+`no first token from assistant` 时，优先检查代理实际出站能力，不要反复更换 cookie：
+
+```bash
+curl -I --proxy http://127.0.0.1:7890 \
+  --connect-timeout 10 --max-time 20 https://muse.ai/thread/new
+```
+
+如果代理返回 `200 Connection established` 后 TLS 仍超时，说明代理节点未生效或已失效。
